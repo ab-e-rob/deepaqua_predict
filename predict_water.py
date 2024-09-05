@@ -13,18 +13,16 @@ from shapely.geometry import shape, MultiPolygon
 import csv
 import pandas as pd
 
-
 ### Set parameters
 STUDY_AREA = 'Helge'
 MODEL_NAME = 'big-2020'
 PATCH_SIZE = 64
-
-
-### Set directories
 BULK_EXPORT_DIR = f'sar_imagery/{STUDY_AREA}_sar_export'
 RESULTS_DIR = f'prediction_tiffs/{STUDY_AREA}/'
 PRETRAINED_MODEL_DIR = f'pretrained_models/{MODEL_NAME}.pth'
-
+WETLAND_BOUNDARY_SHAPEFILE = r'Z:\ramsar_sweden\ramsar_polygons_by_name\\' + STUDY_AREA + '.shp'
+PREDICTION_SHAPEFILES_DIR = f'prediction_shps/{STUDY_AREA}/'
+PREDICTION_CSV_FILE = f'prediction_csvs/{STUDY_AREA}_water_estimates.csv'
 
 ### Get the GPU device
 def get_device():
@@ -168,16 +166,13 @@ def visualize_predicted_image(image, model, device, file_name, model_name):
     unique, counts = np.unique(pred_mask, return_counts=True)
     results = dict(zip(unique, counts))
     image_date = file_name[17:25]
-    # image_date = file_name[8:16]
     satellite = file_name[0:3]
     results['Date'] = image_date
     results['Satellite'] = satellite
     results['File_name'] = file_name
 
-    images_dir = RESULTS_DIR
-
-    if not os.path.isdir(images_dir):
-        os.mkdir(images_dir)
+    if not os.path.isdir(RESULTS_DIR):
+        os.makedirs(RESULTS_DIR)
 
     # Plotting SAR
     plt.imshow(image[:width, :height], cmap='gray')
@@ -186,17 +181,15 @@ def visualize_predicted_image(image, model, device, file_name, model_name):
     plt.imshow(pred_mask)
     img = Image.fromarray(np.uint8((pred_mask) * 255), 'L')
 
-    # use the georeferenced SAR image to generate a GeoTIFF for the prediction mask
-    directory = BULK_EXPORT_DIR
-    tif_files = [file for file in os.listdir(directory) if file.endswith('.tif')]
-
+    # Find a TIFF file to generate a GeoTIFF for the prediction mask
+    tif_files = [file for file in os.listdir(BULK_EXPORT_DIR) if file.endswith('.tif')]
     if tif_files:
-        tif_file = os.path.join(directory, tif_files[0])
+        tif_file = os.path.join(BULK_EXPORT_DIR, tif_files[0])
     else:
-        print("No TIF files found in the directory.")
+        raise FileNotFoundError("No TIF files found in the directory.")
 
     # Generate a GeoTIFF for the prediction mask
-    geotiff_file = images_dir + image_date + '_' + file_name + '_pred.tif'
+    geotiff_file = os.path.join(RESULTS_DIR, f"{image_date}_{file_name}_pred.tif")
     generate_raster(pred_mask, tif_file, geotiff_file, PATCH_SIZE)
 
     return results
@@ -227,6 +220,10 @@ def get_pred_area():
 
     utm_crs = "EPSG:32633"
     areas = []
+
+    if not os.path.exists(PREDICTION_SHAPEFILES_DIR):
+        os.makedirs(PREDICTION_SHAPEFILES_DIR)
+
     # Loop through all the raster files in the images_dir
     for filename in os.listdir(RESULTS_DIR):
         if filename.endswith("pred.tif"):
@@ -247,7 +244,6 @@ def get_pred_area():
                 # Extract polygons with values 1 (or adjust as needed)
                 polygons = [shape(geom) for geom, value in shapes if value == 1]
 
-
                 if polygons:
                     # Dissolve the polygons into a single polygon and buffer it by 0 (no buffer)
                     dissolved_polygon = MultiPolygon(polygons).buffer(0)
@@ -261,19 +257,15 @@ def get_pred_area():
                     # Reproject the GeoDataFrame to UTM (or your desired projected CRS)
                     dissolved_gdf = dissolved_gdf.to_crs(utm_crs)
 
-                    # clip by wetland boundary using gpd
-                    wetland_boundary = gpd.read_file(r'Z:\ramsar_sweden\ramsar_polygons_by_name\\' + STUDY_AREA + '.shp')
+                    # Clip by wetland boundary using gpd
+                    wetland_boundary = gpd.read_file(WETLAND_BOUNDARY_SHAPEFILE)
                     wetland_boundary = wetland_boundary.to_crs(utm_crs)
                     dissolved_gdf = gpd.clip(dissolved_gdf, wetland_boundary)
 
-
                     # Save the shapefile for testing purposes
-                    if not os.path.exists(f'prediction_shps/{STUDY_AREA}/'):
-                        os.makedirs(f'prediction_shps/{STUDY_AREA}/')
+                    dissolved_gdf.to_file(os.path.join(PREDICTION_SHAPEFILES_DIR, f"{filename[:-13]}_pred.shp"))
 
-                    dissolved_gdf.to_file(f'prediction_shps/{STUDY_AREA}/{filename[:-13]}_pred.shp')
-
-                    # skip if dataframe is empty
+                    # Skip if dataframe is empty
                     if dissolved_gdf.empty:
                         continue
 
@@ -287,7 +279,7 @@ def get_pred_area():
                     areas.append({'Name': STUDY_AREA, 'Date': image_date, 'Area (metres squared)': area_utm})
 
     # Create a CSV file with the area information for all images
-    with open(f'prediction_csvs/{STUDY_AREA}_water_estimates.csv', 'w', newline='') as csvfile:
+    with open(PREDICTION_CSV_FILE, 'w', newline='') as csvfile:
         fieldnames = ['Name', 'Date', 'Area (metres squared)']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
@@ -323,12 +315,10 @@ def full_cycle(model_name):
     print("Generating area estimates...")
     get_pred_area()
 
-
 def main():
     if not os.path.exists(RESULTS_DIR):
         os.makedirs(RESULTS_DIR)
     full_cycle(MODEL_NAME)
-
 
 if __name__ == "__main__":
     main()

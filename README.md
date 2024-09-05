@@ -1,5 +1,7 @@
 # SAR imagery processing, download and water extent predictions from DeepAqua
 
+Code originally developed by melqkiades/deep-wetlands
+
 This repository contains scripts for processing SAR (Synthetic Aperture Radar) imagery, including:
 
 1. **Google Earth Engine (GEE) Export**: Exports SAR imagery from Google Earth Engine.2

@@ -1,19 +1,14 @@
-import os
 import time
-
 import geetools
 from geetools import batch
-import geopandas as gpd
 import ee
-import eeconvert as eec
-from unidecode import unidecode
 
 ### Define parameters ###
 
-area_name = 'Vasikkavouma'
+area_name = 'Tavvavuoma'
 ORBIT_PASS = 'DESCENDING'
-START_DATE = '2020-06-01'
-END_DATE = '2020-06-15'
+START_DATE = '2020-01-01'
+END_DATE = '2023-12-31'
 
 # For monthly composite export only
 START_YEAR = 2020
@@ -33,7 +28,10 @@ def get_area_of_interest(area_name):
     areas_of_interest = {
         'Vasikkavouma': ee.Geometry.Polygon(
             [[[23.11432701111463, 67.19432612267958], [23.28644369047891, 67.19432612267958],
-              [23.28644369047891, 67.25682392423104], [23.11432701111463, 67.25682392423104]]])
+              [23.28644369047891, 67.25682392423104], [23.11432701111463, 67.25682392423104]]]),
+        'Tavvavuoma': ee.Geometry.Polygon(
+            [[[19.937500000000032, 68.39583333333334], [21.050000000000022, 68.39583333333334],
+              [21.050000000000022, 68.70890062120226], [19.937500000000032, 68.70890062120226]]])
     }
 
     return areas_of_interest[area_name]

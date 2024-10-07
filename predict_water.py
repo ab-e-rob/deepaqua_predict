@@ -16,7 +16,7 @@ import rasterio as rio
 
 ### Set parameters
 STUDY_AREA = 'Helge'
-MODEL_NAME = 'big-2020'
+MODEL_NAME = 'mild-wind-64_epoch_10'
 PATCH_SIZE = 64
 BAND = 'VH'
 BULK_EXPORT_DIR = f'sar_imagery/{STUDY_AREA}_sar_export'
@@ -193,7 +193,7 @@ def get_pred_area():
                     wetland_boundary = gpd.read_file(WETLAND_BOUNDARY_SHAPEFILE)
                     wetland_boundary = wetland_boundary.to_crs(utm_crs)
                     dissolved_gdf = gpd.clip(dissolved_gdf, wetland_boundary)
-                    dissolved_gdf.to_file(os.path.join(PREDICTION_SHAPEFILES_DIR, f"{filename[:-13]}_pred.shp"))
+                    dissolved_gdf.to_file(os.path.join(PREDICTION_SHAPEFILES_DIR, f"{filename[:-13]}_{MODEL_NAME}_pred.shp"))
 
                     if dissolved_gdf.empty:
                         continue

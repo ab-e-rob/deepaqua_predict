@@ -2,9 +2,14 @@ import ee
 import geopandas as gpd
 
 ### Set parameters
-START_DATE = '2023-08-01'
-END_DATE = '2024-09-01'
-PATH_TO_SHP = 'training_data/orebro_lan.shp'
+START_DATE = '2024-05-01'
+END_DATE = '2024-10-01'
+PATH_TO_SHP = 'training_data/sweden.shp'
+
+
+def calculate_area(geometry):
+    """Calculate the area of the geometry."""
+    return geometry.area().getInfo()
 
 
 def get_matching_dates_from_shapefile(shapefile_path, start_date, end_date):
@@ -18,7 +23,7 @@ def get_matching_dates_from_shapefile(shapefile_path, start_date, end_date):
         end_date (str): The end date in the format 'YYYY-MM-DD'.
 
     Returns:
-        list: List of matching dates.
+        list: List of matching dates and their corresponding image IDs.
     """
     # Read the shapefile
     gdf = gpd.read_file(shapefile_path)
@@ -35,7 +40,7 @@ def get_matching_dates_from_shapefile(shapefile_path, start_date, end_date):
     s2_collection = ee.ImageCollection('COPERNICUS/S2_HARMONIZED') \
         .filterBounds(aoi) \
         .filterDate(start_date, end_date) \
-        .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 0))
+        .filter(ee.Filter.lte('CLOUDY_PIXEL_PERCENTAGE', 5))
 
     # Get unique dates for Sentinel-2
     s2_dates = s2_collection.aggregate_array('system:time_start') \
@@ -45,8 +50,9 @@ def get_matching_dates_from_shapefile(shapefile_path, start_date, end_date):
     # Convert to Python list
     s2_dates = s2_dates.getInfo()
 
-    # Initialize empty list for matching dates
+    # Initialize empty list for matching dates and their IDs
     matching_dates = []
+    matching_ids = []
 
     # Loop through Sentinel-2 dates to find matching Sentinel-1 dates
     for date in s2_dates:
@@ -59,8 +65,12 @@ def get_matching_dates_from_shapefile(shapefile_path, start_date, end_date):
         if s2_image is None:
             continue
 
+        # Get the geometry of the Sentinel-2 image
+        s2_geometry = s2_image.geometry()
+        s2_area = calculate_area(s2_geometry)  # Area of Sentinel-2 image
+
         # Get the bounding box of the Sentinel-2 image
-        s2_bbox_info = s2_image.geometry().bounds().getInfo()
+        s2_bbox_info = s2_geometry.bounds().getInfo()
         s2_bbox = s2_bbox_info['coordinates'][0]
         if len(s2_bbox) == 5:
             s2_bbox = [s2_bbox[0][0], s2_bbox[0][1], s2_bbox[2][0], s2_bbox[2][1]]
@@ -84,14 +94,27 @@ def get_matching_dates_from_shapefile(shapefile_path, start_date, end_date):
         # Find the intersection of the two lists
         common_dates = list(set([date]) & set(s1_dates))
         if common_dates:
-            matching_dates.extend(common_dates)
+            # Get the corresponding Sentinel-1 image
+            s1_image = s1_collection.filterDate(date_ee, date_ee.advance(1, 'day')).first()
+            s1_geometry = s1_image.geometry() if s1_image else None
+
+            if s1_geometry:
+                # Calculate intersection area
+                intersection_area = calculate_area(s2_geometry.intersection(s1_geometry))
+
+                # Check if the intersection area is at least 90% of the Sentinel-2 area
+                if intersection_area >= 0.9 * s2_area:
+                    matching_dates.extend(common_dates)
+                    # Store the corresponding image IDs
+                    s1_image_id = s1_image.id().getInfo() if s1_image else None
+                    matching_ids.append((date, s2_image.id().getInfo(), s1_image_id))
 
     matching_dates = list(set(matching_dates))
     matching_dates.sort()
 
-    print("Matching dates between Sentinel-2 and Sentinel-1 with 0% cloud cover:")
-    for i, date in enumerate(matching_dates):
-        print(f"{i + 1}: {date}")
+    print("Matching dates between Sentinel-2 and Sentinel-1 with 5% cloud cover:")
+    for i, (date, s2_id, s1_id) in enumerate(matching_ids):
+        print(f"{i + 1}: Date: {date}, Sentinel-2 ID: {s2_id}, Sentinel-1 ID: {s1_id}")
 
     return matching_dates
 

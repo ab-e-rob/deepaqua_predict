@@ -3,7 +3,7 @@ from shapely.geometry import Polygon, mapping
 import json
 
 ### Define wetland/wetlandscape name
-STUDY_AREA = 'Tavvavuoma'
+STUDY_AREA = 'Helge'
 
 ### Define shapefile path ###
 SHAPEFILE_PATH = f'study_areas/{STUDY_AREA}.shp'

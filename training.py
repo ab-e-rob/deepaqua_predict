@@ -11,12 +11,12 @@ from models.unet import Unet
 
 ### SET PARAMETERS
 config = {
-    'EPOCHS': 20,
+    'EPOCHS': 60,
     'PATCH_SIZE': 64,
     'BATCH_SIZE': 32,
     'NUM_WORKERS': 4,
     'RANDOM_SEED': 42,
-    'LEARNING_RATE': 0.0001,
+    'LEARNING_RATE': 0.001,
     'MODELS_DIR': 'models',
     'NEW_MODELS_DIR': 'new_models',
     'LOSS_FUNCTION': 'dice',
@@ -32,8 +32,14 @@ class DiceLoss(nn.Module):
         self.lambda_ = lambda_
 
     def forward(self, y_pred, y_true):
-        y_pred = y_pred[:, 0].view(-1)
-        y_true = y_true[:, 0].view(-1)
+        # Remove NaNs by masking
+        valid_mask = torch.logical_and(~torch.isnan(y_pred), ~torch.isnan(y_true))
+        y_pred = y_pred[valid_mask]
+        y_true = y_true[valid_mask]
+
+        if y_pred.numel() == 0 or y_true.numel() == 0:
+            return torch.tensor(0.0, device=y_pred.device)
+
         intersection = (y_pred * y_true).sum()
         dice_loss = (2. * intersection + self.lambda_) / (y_pred.sum() + y_true.sum() + self.lambda_)
         return 1. - dice_loss
@@ -44,7 +50,7 @@ def create_loss_function(loss_function_name):
     raise ValueError(f'Unrecognized loss function: {loss_function_name}')
 
 def load_model(model_file, device):
-    model = Unet(in_channels=1, out_channels=1, init_dim=64, num_blocks=5)
+    model = Unet(in_channels=3, out_channels=1, init_dim=64, num_blocks=5)
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.to(device)
     model.eval()
@@ -115,19 +121,21 @@ class CFDDataset(Dataset):
 
     def __getitem__(self, index):
         index_ = self.dataset.iloc[index]['id']
-        # Adjust the image_path and mask_path based on the correct naming convention
         image_path = os.path.join(self.images_dir, f"{index_}")
         mask_path = os.path.join(self.masks_dir, f"{index_.replace('-sar_image.tif', '-ndwi_mask.tif')}")
 
-        # Ensure the correct extension is included
         if not image_path.endswith('.tif'):
-            image_path += '-sar_image.tif'  # Ensure the correct suffix for SAR images
+            image_path += '-sar_image.tif'
         if not mask_path.endswith('.tif'):
-            mask_path += '-ndwi_mask.tif'  # Ensure the correct suffix for NDWI masks
+            mask_path += '-ndwi_mask.tif'
 
-        # Load the image and mask
         image = rio.open(image_path).read()
         mask = rio.open(mask_path).read()
+
+        # Handle NaNs in images and masks
+        image[np.isnan(image)] = 0  # Replace NaNs with 0
+        mask[np.isnan(mask)] = 0  # Replace NaNs with 0
+
         return torch.from_numpy(image.astype(np.float32)), torch.from_numpy(mask.astype(np.float32))
 
     def __len__(self):
@@ -144,6 +152,7 @@ def get_dataloaders(data, batch_size, num_workers, images_dir, masks_dir):
     }
 
 def train(model, dataloader, criterion, optimizer, device):
+
     model.train()
     losses, ious = [], []
     for input, target in tqdm(dataloader, total=len(dataloader)):
@@ -153,6 +162,12 @@ def train(model, dataloader, criterion, optimizer, device):
         output = model(input)
 
         loss = criterion(output, target)
+
+        # Skip if loss is NaN
+        if torch.isnan(loss):
+            print("Skipping batch due to NaN loss.")
+            continue
+
         loss.backward()
         optimizer.step()
 
@@ -173,8 +188,8 @@ def test(model, dataloader, criterion, device):
             output = model(input)
             loss = criterion(output, target)
 
-            # Skip batches with NaN values in loss
-            if torch.isnan(loss).any():
+            # Skip if loss is NaN
+            if torch.isnan(loss):
                 print("Skipping batch due to NaN loss.")
                 continue
 
@@ -218,13 +233,15 @@ def full_cycle():
 
     plant_random_seed(config['RANDOM_SEED'])
     create_tiles_file(config['SAR_DIR'], config['NDWI_MASK_DIR'])
-    tiles_data = pd.read_csv(config['TILES_FILE'])
+    tiles_data = pd.read_csv(config['TILES_FILE'], index_col=0)
 
-    device = get_device()  # Use the get_device function to set the device
+    device = get_device()  # This should return 'cuda' if GPU is available, or 'cpu'
     dataloaders = get_dataloaders(tiles_data, config['BATCH_SIZE'], config['NUM_WORKERS'], config['SAR_DIR'], config['NDWI_MASK_DIR'])
-    model = Unet(in_channels=1, out_channels=1, init_dim=64, num_blocks=5).to(device)
-    criterion = create_loss_function(config['LOSS_FUNCTION'])
+
+    # Set up model and move it to the device
+    model = Unet(in_channels=3, out_channels=1, init_dim=64, num_blocks=5).to(device)  # Move model to GPU
     optimizer = torch.optim.Adam(model.parameters(), lr=config['LEARNING_RATE'])
+    criterion = create_loss_function(config['LOSS_FUNCTION']).to(device)  # Move criterion to device if applicable
 
     for epoch in tqdm(range(1, config['EPOCHS'] + 1)):
         print(f'Epoch {epoch}/{config["EPOCHS"]}')
@@ -244,5 +261,6 @@ def full_cycle():
 
     wandb.finish()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     full_cycle()
+

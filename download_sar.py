@@ -4,11 +4,10 @@ from geetools import batch
 import ee
 
 ### Define parameters ###
-
-area_name = 'Helge'
+area_name = 'Persofjarden'
 ORBIT_PASS = 'DESCENDING'
-START_DATE = '2024-06-01'
-END_DATE = '2024-06-30'
+START_DATE = '2023-06-01'
+END_DATE = '2023-06-15'
 
 # For monthly composite export only
 START_YEAR = 2020
@@ -34,19 +33,25 @@ def get_area_of_interest(area_name):
               [21.050000000000022, 68.70890062120226], [19.937500000000032, 68.70890062120226]]]),
         'Helge': ee.Geometry.Polygon(
             [[[14.068034007763288, 55.85561234963029], [14.265849302303536, 55.85561234963029],
-              [14.265849302303536, 56.1001022452225], [14.068034007763288, 56.1001022452225]]])
-
+              [14.265849302303536, 56.1001022452225], [14.068034007763288, 56.1001022452225]]]),
+        'Osten': ee.Geometry.Polygon(
+            [[[13.873464893490109, 58.534126363341045], [13.96474439943455, 58.534126363341045],
+              [13.96474439943455, 58.59721449015666], [13.873464893490109, 58.59721449015666], ]]),
+        'Persofjarden': ee.Geometry.Polygon(
+            [[[21.94304304010427, 65.71885538936476], [22.171295698637607, 65.71885538936476],
+              [22.171295698637607, 65.83352842819448], [21.94304304010427, 65.83352842819448], ]])
     }
 
     return areas_of_interest[area_name]
 
 # Downloads all SAR images for the AOI between the start and end dates
-def bulk_export_sar(area_name):
+def bulk_export_sar(area_name, include_diff=False):
     """
     Export all SAR images for the given area of interest (AOI) within the specified date range.
 
     Args:
         area_name (str): Name of the area of interest.
+        include_diff (bool): Whether to include the VV-VH difference band.
     """
     start_date = START_DATE
     end_date = END_DATE
@@ -77,8 +82,16 @@ def bulk_export_sar(area_name):
         img_id = img.get('system:index').getInfo()  # Get the image ID
         export_description = f'{img_id}'  # Custom name using the image ID
 
+        # Include VV-VH difference band if requested
+        if include_diff:
+            vv_minus_vh = img.select('VV').subtract(img.select('VH')).rename('VV_VH_diff')
+            img = img.addBands(vv_minus_vh)
+            bands = ['VV', 'VH', 'VV_VH_diff']
+        else:
+            bands = ['VV', 'VH']
+
         task = ee.batch.Export.image.toDrive(
-            image=img,
+            image=img.select(bands),
             description=export_description,
             folder=f'{area_name}_sar_export',  # Google Drive folder name
             scale=10,
@@ -172,7 +185,7 @@ def main():
     ee.Initialize()
 
     # Choose which function to run
-    bulk_export_sar(area_name)
+    bulk_export_sar(area_name, include_diff=True)
     # bulk_export_monthly_sar(area_name)
 
 if __name__ == "__main__":

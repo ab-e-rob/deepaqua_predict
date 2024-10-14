@@ -15,10 +15,9 @@ import pandas as pd
 import rasterio as rio
 
 ### Set parameters
-STUDY_AREA = 'Helge'
-MODEL_NAME = 'mild-wind-64_epoch_10'
+STUDY_AREA = 'Osten'
+MODEL_NAME = 'spring-jazz-85_epoch_60'
 PATCH_SIZE = 64
-BAND = 'VH'
 BULK_EXPORT_DIR = f'sar_imagery/{STUDY_AREA}_sar_export'
 RESULTS_DIR = f'prediction_tiffs/{STUDY_AREA}/'
 PRETRAINED_MODEL_DIR = f'pretrained_models/{MODEL_NAME}.pth'
@@ -41,7 +40,7 @@ def get_device():
 
 ### Load the model
 def load_model(model_file, device):
-    model = Unet(in_channels=1, out_channels=1, init_dim=64, num_blocks=5)
+    model = Unet(in_channels=3, out_channels=1, init_dim=64, num_blocks=5)
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.to(device)
     model.eval()
@@ -52,30 +51,24 @@ def load_model(model_file, device):
 
 
 ### Read and normalize image
-def read_image(tiff_file, band, ignore_nan=False):
+def read_image(tiff_file, ignore_nan=False):
     with rio.open(tiff_file) as src:
-        # Find the index of the desired band
-        band_index = src.descriptions.index(band)
+        image = np.zeros((3, src.height, src.width), dtype=np.float32)
+        image[0, :, :] = src.read(1).astype(np.float32)  # VV
+        image[1, :, :] = src.read(2).astype(np.float32)  # VH
+        image[2, :, :] = image[0, :, :] - image[1, :, :]  # VV - VH (Difference)
 
-        # Read the specific band
-        image = src.read(band_index + 1).astype(np.float32)
-
-        # If the image is incomplete and has NaN values we ignore it
         if ignore_nan and np.isnan(image).any():
             return None
 
-        # Normalize using the 1st and 99th percentiles
-        min_value = np.nanpercentile(image, 1)
-        max_value = np.nanpercentile(image, 99)
+        for i in range(3):
+            min_value = np.nanpercentile(image[i, :, :], 1)
+            max_value = np.nanpercentile(image[i, :, :], 99)
+            image[i, :, :] = np.clip(image[i, :, :], min_value, max_value)
+            image[i, :, :] = (image[i, :, :] - min_value) / (max_value - min_value)
+            image[i, :, :][np.isnan(image[i, :, :])] = 0
 
-        image[image > max_value] = max_value
-        image[image < min_value] = min_value
-
-        array_min, array_max = np.nanmin(image), np.nanmax(image)
-        normalized_image = (image - array_min) / (array_max - array_min)
-        normalized_image[np.isnan(normalized_image)] = 0
-
-        return normalized_image
+        return image
 
 
 ### Generate raster from prediction mask
@@ -101,20 +94,26 @@ def generate_raster(image, src_tif, dest_file, step_size):
 
 ### Predict water mask
 def predict_water_mask(sar_image, model, device, threshold=0.5):
-    height, width = sar_image.shape
+    channels, height, width = sar_image.shape
+
+    # Ensure height_adj and width_adj are defined
     height_adj = height - height % PATCH_SIZE
     width_adj = width - width % PATCH_SIZE
-    pred_mask = np.zeros(tuple((height_adj, width_adj)))
+
+    sar_image = sar_image[:, :height_adj, :width_adj]
+
+    pred_mask = np.zeros((height_adj, width_adj))
 
     for h in range(0, height_adj, PATCH_SIZE):
         for w in range(0, width_adj, PATCH_SIZE):
-            sar_image_crop = sar_image[h:h + PATCH_SIZE, w:w + PATCH_SIZE]
-            sar_image_crop = sar_image_crop[None, None, :, :]
-            binary_image = np.where(sar_image_crop.sum(2) > 0, 1, 0)
-            sar_image_crop = torch.from_numpy(sar_image_crop.astype(np.float32)).to(device)
+            sar_image_crop = sar_image[:, h:h + PATCH_SIZE, w:w + PATCH_SIZE]
 
-            pred = model(sar_image_crop).cpu().detach().numpy()
-            pred = (pred).squeeze() * binary_image
+            binary_image = np.where(sar_image_crop.sum(0) > 0, 1, 0)
+
+            sar_image_crop = torch.from_numpy(sar_image_crop.astype(np.float32)).to(device)
+            pred = model(sar_image_crop[None, ...]).cpu().detach().numpy().squeeze()
+
+            pred = (pred * binary_image)
             pred = np.where(pred < threshold, 0, 1)
 
             pred_mask[h:h + PATCH_SIZE, w:w + PATCH_SIZE] = pred
@@ -124,8 +123,10 @@ def predict_water_mask(sar_image, model, device, threshold=0.5):
 
 ### Visualize and save predicted image
 def visualize_predicted_image(image, model, device, file_name, model_name):
-    width = image.shape[0] - image.shape[0] % PATCH_SIZE
-    height = image.shape[1] - image.shape[1] % PATCH_SIZE
+    channels, height, width = image.shape
+
+    width = width - width % PATCH_SIZE
+    height = height - height % PATCH_SIZE
 
     pred_mask = predict_water_mask(image, model, device)
 
@@ -140,10 +141,9 @@ def visualize_predicted_image(image, model, device, file_name, model_name):
     if not os.path.isdir(RESULTS_DIR):
         os.makedirs(RESULTS_DIR)
 
-    plt.imshow(image[:width, :height], cmap='gray')
-    plt.imshow(pred_mask)
+    plt.imshow(image[0, :width, :height], cmap='gray')
+    plt.imshow(pred_mask, alpha=0.5)
     img = Image.fromarray(np.uint8((pred_mask) * 255), 'L')
-    #plt.show()
 
     tif_files = [file for file in os.listdir(BULK_EXPORT_DIR) if file.endswith('.tif')]
     if tif_files:
@@ -159,7 +159,7 @@ def visualize_predicted_image(image, model, device, file_name, model_name):
 
 ### Predict image
 def get_prediction_image(tiff_file, model, device, model_name):
-    image = read_image(tiff_file, band=BAND)
+    image = read_image(tiff_file)
     if image is None:
         return None
     file_name = os.path.basename(tiff_file)
@@ -193,7 +193,8 @@ def get_pred_area():
                     wetland_boundary = gpd.read_file(WETLAND_BOUNDARY_SHAPEFILE)
                     wetland_boundary = wetland_boundary.to_crs(utm_crs)
                     dissolved_gdf = gpd.clip(dissolved_gdf, wetland_boundary)
-                    dissolved_gdf.to_file(os.path.join(PREDICTION_SHAPEFILES_DIR, f"{filename[:-13]}_{MODEL_NAME}_pred.shp"))
+                    dissolved_gdf.to_file(
+                        os.path.join(PREDICTION_SHAPEFILES_DIR, f"{filename[:-13]}_{MODEL_NAME}_pred.shp"))
 
                     if dissolved_gdf.empty:
                         continue
@@ -220,16 +221,12 @@ def full_cycle(model_name):
     model_file = PRETRAINED_MODEL_DIR
     model = load_model(model_file, device)
 
-    if not os.path.exists(RESULTS_DIR):
-        os.makedirs(RESULTS_DIR)
-
-    for tiff_file in tqdm(filenames, desc="Predicting water masks"):
-        file_path = os.path.join(BULK_EXPORT_DIR, tiff_file)
-        get_prediction_image(file_path, model, device, model_name)
+    for tiff_file in tqdm(filenames, desc="Processing SAR images"):
+        get_prediction_image(os.path.join(BULK_EXPORT_DIR, tiff_file), model, device, model_name)
 
     get_pred_area()
-    print('Prediction cycle completed!')
 
 
-# Execute full cycle
-full_cycle(MODEL_NAME)
+### Main function
+if __name__ == "__main__":
+    full_cycle(MODEL_NAME)

@@ -8,15 +8,16 @@ from torch.utils.data import Dataset, DataLoader
 import rasterio as rio
 from tqdm.notebook import tqdm
 from models.unet import Unet
+import matplotlib.pyplot as plt
 
 ### SET PARAMETERS
 config = {
-    'EPOCHS': 60,
+    'EPOCHS': 20,
     'PATCH_SIZE': 64,
-    'BATCH_SIZE': 32,
-    'NUM_WORKERS': 4,
+    'BATCH_SIZE': 4,
+    'NUM_WORKERS': 0,
     'RANDOM_SEED': 42,
-    'LEARNING_RATE': 0.001,
+    'LEARNING_RATE': 0.00005,
     'MODELS_DIR': 'models',
     'NEW_MODELS_DIR': 'new_models',
     'LOSS_FUNCTION': 'dice',
@@ -26,31 +27,74 @@ config = {
     'TILES_FILE': 'tiles.csv'  # Changed to .csv for consistency
 }
 
+class CFDDataset(Dataset):
+    def __init__(self, dataset, images_dir, masks_dir):
+        self.dataset = dataset
+        self.images_dir = images_dir
+        self.masks_dir = masks_dir
+
+    def __getitem__(self, index):
+        index_ = self.dataset.iloc[index]['id']
+
+        image_path = os.path.join(self.images_dir, f"{index_}")
+        mask_path = os.path.join(self.masks_dir, f"{index_.replace('-sar_image.tif', '-ndwi_mask.tif')}")
+
+        if not image_path.endswith('.tif'):
+            image_path += '-sar_image.tif'
+        if not mask_path.endswith('.tif'):
+            mask_path += '-ndwi_mask.tif'
+
+        # Read only the second band (VH)
+        image = rio.open(image_path).read(1)  # Read VV only
+
+        # Read the NDWI mask
+        mask = rio.open(mask_path).read()
+
+        # Handle NaNs in images and masks
+        image[np.isnan(image)] = 0  # Replace NaNs with 0
+        mask[np.isnan(mask)] = 0  # Replace NaNs with 0
+
+        # Expand dims to add channel dimension
+        image = np.expand_dims(image, axis=0)
+
+        return torch.from_numpy(image.astype(np.float32)), torch.from_numpy(mask.astype(np.float32)), index_
+
+    def __len__(self):
+        return len(self.dataset)
+
+def get_dataloaders(data, batch_size, num_workers, images_dir, masks_dir):
+    datasets = {
+        'train': CFDDataset(data[data.split == 'train'], images_dir, masks_dir),
+        'test': CFDDataset(data[data.split == 'test'], images_dir, masks_dir)
+    }
+    return {
+        'train': DataLoader(datasets['train'], batch_size=batch_size, shuffle=True, num_workers=num_workers),
+        'test': DataLoader(datasets['test'], batch_size=batch_size, drop_last=False, num_workers=num_workers)
+    }
+
 class DiceLoss(nn.Module):
     def __init__(self, lambda_=1.):
         super(DiceLoss, self).__init__()
         self.lambda_ = lambda_
 
     def forward(self, y_pred, y_true):
-        # Remove NaNs by masking
-        valid_mask = torch.logical_and(~torch.isnan(y_pred), ~torch.isnan(y_true))
-        y_pred = y_pred[valid_mask]
-        y_true = y_true[valid_mask]
-
-        if y_pred.numel() == 0 or y_true.numel() == 0:
-            return torch.tensor(0.0, device=y_pred.device)
-
+        y_pred = y_pred[:, 0].view(-1)
+        y_true = y_true[:, 0].view(-1)
         intersection = (y_pred * y_true).sum()
-        dice_loss = (2. * intersection + self.lambda_) / (y_pred.sum() + y_true.sum() + self.lambda_)
+        dice_loss = (2. * intersection  + self.lambda_) / (
+            y_pred.sum() + y_true.sum() + self.lambda_
+        )
         return 1. - dice_loss
 
-def create_loss_function(loss_function_name):
+
+def create_loss_function(loss_function_name, focal_gamma=3):
     if loss_function_name == 'dice':
         return DiceLoss()
-    raise ValueError(f'Unrecognized loss function: {loss_function_name}')
+    else:
+        raise ValueError(f'Unrecognized loss function: {loss_function_name}')
 
 def load_model(model_file, device):
-    model = Unet(in_channels=3, out_channels=1, init_dim=64, num_blocks=5)
+    model = Unet(in_channels=1, out_channels=1, init_dim=64, num_blocks=5)
     model.load_state_dict(torch.load(model_file, map_location=device))
     model.to(device)
     model.eval()
@@ -93,15 +137,15 @@ def create_tiles_file(sar_dir, ndwi_dir):
 
     tiles_data_frame = pd.DataFrame({'index': common_indexes, 'id': common_files})
     tiles_data_frame.set_index('index', inplace=True)
-    tiles_data_frame['split'] = 'train'
+    tiles_data_frame['split'] = 'test'
 
     # reduce the number of tiles for testing by 90%
     tiles_data_frame = tiles_data_frame.sample(frac=1)
 
     # Split into train and test sets
     num_rows = len(tiles_data_frame)
-    test_rows = int(num_rows * 0.2)
-    tiles_data_frame.loc[tiles_data_frame.tail(test_rows).index, 'split'] = 'test'
+    test_rows = int(num_rows * 0.8)
+    tiles_data_frame.loc[tiles_data_frame.tail(test_rows).index, 'split'] = 'train'
 
     # Save to CSV
     tiles_file = os.getenv("TILES_FILE", "tiles.csv")  # Default to "tiles.csv" if not set
@@ -113,92 +157,49 @@ def plant_random_seed(seed):
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-class CFDDataset(Dataset):
-    def __init__(self, dataset, images_dir, masks_dir):
-        self.dataset = dataset
-        self.images_dir = images_dir
-        self.masks_dir = masks_dir
-
-    def __getitem__(self, index):
-        index_ = self.dataset.iloc[index]['id']
-        image_path = os.path.join(self.images_dir, f"{index_}")
-        mask_path = os.path.join(self.masks_dir, f"{index_.replace('-sar_image.tif', '-ndwi_mask.tif')}")
-
-        if not image_path.endswith('.tif'):
-            image_path += '-sar_image.tif'
-        if not mask_path.endswith('.tif'):
-            mask_path += '-ndwi_mask.tif'
-
-        image = rio.open(image_path).read()
-        mask = rio.open(mask_path).read()
-
-        # Handle NaNs in images and masks
-        image[np.isnan(image)] = 0  # Replace NaNs with 0
-        mask[np.isnan(mask)] = 0  # Replace NaNs with 0
-
-        return torch.from_numpy(image.astype(np.float32)), torch.from_numpy(mask.astype(np.float32))
-
-    def __len__(self):
-        return len(self.dataset)
-
-def get_dataloaders(data, batch_size, num_workers, images_dir, masks_dir):
-    datasets = {
-        'train': CFDDataset(data[data.split == 'train'], images_dir, masks_dir),
-        'test': CFDDataset(data[data.split == 'test'], images_dir, masks_dir)
-    }
-    return {
-        'train': DataLoader(datasets['train'], batch_size=batch_size, shuffle=True, num_workers=num_workers),
-        'test': DataLoader(datasets['test'], batch_size=batch_size, drop_last=False, num_workers=num_workers)
-    }
 
 def train(model, dataloader, criterion, optimizer, device):
-
-    model.train()
+    model.train(True)
     losses, ious = [], []
-    for input, target in tqdm(dataloader, total=len(dataloader)):
+    for input, target, _ in tqdm(dataloader, total=len(dataloader)):  # Unpack the additional index
         input, target = input.to(device), target.to(device)
 
         optimizer.zero_grad()
-        output = model(input)
 
-        loss = criterion(output, target)
+        with torch.set_grad_enabled(True):
+            output = model(input)
 
-        # Skip if loss is NaN
-        if torch.isnan(loss):
-            print("Skipping batch due to NaN loss.")
-            continue
+            loss = criterion(output, target)
 
-        loss.backward()
-        optimizer.step()
+            loss.backward()
+            optimizer.step()
 
-        iou = intersection_over_union(output, target)
+            iou = intersection_over_union(output, target)
 
-        losses.append(loss.item())
-        ious.append(iou.cpu().item())
+            losses.append(loss.cpu().detach().numpy())
+            ious.append(iou.cpu().detach().numpy())
 
     return np.mean(losses), np.mean(ious)
 
 def test(model, dataloader, criterion, device):
     model.eval()
     losses, ious = [], []
-    inf_tile_ids = []  # To keep track of tile IDs with inf IoU
-    with torch.no_grad():
-        for input, target in tqdm(dataloader, total=len(dataloader)):
-            input, target = input.to(device), target.to(device)
+
+
+    for input, target, _ in tqdm(dataloader, total=len(dataloader)):
+        input, target = input.to(device), target.to(device)
+
+        with torch.no_grad():
             output = model(input)
             loss = criterion(output, target)
 
-            # Skip if loss is NaN
-            if torch.isnan(loss):
-                print("Skipping batch due to NaN loss.")
-                continue
-
             iou = intersection_over_union(output, target)
 
-            losses.append(loss.item())
-            ious.append(iou.cpu().item())
+            losses.append(loss.cpu().detach().numpy())
+            ious.append(iou.cpu().detach().numpy())
 
-    return np.mean(losses), np.mean(ious), inf_tile_ids
+    return np.mean(losses), np.mean(ious)
+
 
 def save_model(model, model_dir, model_name, epoch):
     os.makedirs(model_dir, exist_ok=True)
@@ -209,13 +210,42 @@ def save_model(model, model_dir, model_name, epoch):
 
 def intersection_over_union(y_pred, y_true):
     smooth = 1e-6
-    y_pred = (y_pred > 0.5).float()
-    y_true = (y_true > 0.5).float()
 
-    intersection = (y_pred * y_true).sum() + smooth
-    union = (y_pred + y_true).sum() - intersection + smooth
+    y_pred = y_pred[:, 0].view(-1) > 0.5
+    y_true = y_true[:, 0].view(-1) > 0.5
+    intersection = (y_pred & y_true).sum() + smooth
+    union = (y_pred | y_true).sum() + smooth
+    iou = intersection / union
 
-    return intersection / union
+    return iou
+
+def plot_validation_images(model, dataloader, device, epoch, num_images=3):
+    model.eval()
+    with torch.no_grad():
+        for i, (input, target, index) in enumerate(dataloader):
+            if i >= num_images:
+                break  # Limit the number of images to plot
+            input, target = input.to(device), target.to(device)
+            output = model(input)
+            output = (output > 0.5).float()  # Threshold the prediction
+
+            # Plot the images in the batch
+            plt.figure(figsize=(12, 4 * num_images))
+
+            for j in range(num_images):
+                plt.subplot(num_images, 3, 3 * j + 1)
+                plt.imshow(input[j, 0, :, :].cpu(), cmap='gray')
+                plt.title(f'Input Image - Tile ID: {index[j]}')
+
+                plt.subplot(num_images, 3, 3 * j + 2)
+                plt.imshow(target[j, 0, :, :].cpu(), cmap='gray')
+                plt.title('Ground Truth')
+
+                plt.subplot(num_images, 3, 3 * j + 3)
+                plt.imshow(output[j, 0, :, :].cpu(), cmap='gray')
+                plt.title(f'Prediction (Epoch {epoch})')
+
+            plt.show()
 
 def full_cycle():
     for key in ['EPOCHS', 'PATCH_SIZE', 'BATCH_SIZE', 'NUM_WORKERS', 'RANDOM_SEED']:
@@ -225,8 +255,7 @@ def full_cycle():
 
     wandb.init(project="deep-wetlands", entity="abigail-robinson", config=config)
 
-    # Retrieve model name from WandB config
-    model_name = wandb.run.name  # This will be the WandB run name
+    model_name = wandb.run.name
 
     for key, value in config.items():
         os.environ[key] = str(value)
@@ -235,29 +264,40 @@ def full_cycle():
     create_tiles_file(config['SAR_DIR'], config['NDWI_MASK_DIR'])
     tiles_data = pd.read_csv(config['TILES_FILE'], index_col=0)
 
-    device = get_device()  # This should return 'cuda' if GPU is available, or 'cpu'
+    device = get_device()
     dataloaders = get_dataloaders(tiles_data, config['BATCH_SIZE'], config['NUM_WORKERS'], config['SAR_DIR'], config['NDWI_MASK_DIR'])
 
-    # Set up model and move it to the device
-    model = Unet(in_channels=3, out_channels=1, init_dim=64, num_blocks=5).to(device)  # Move model to GPU
+    model = Unet(in_channels=1, out_channels=1, init_dim=64, num_blocks=5).to(device)
+
+    # print model parameters
+    print(model)
+    print('Model parameters', sum(param.numel() for param in model.parameters()))
+
+    criterion = create_loss_function(config['LOSS_FUNCTION']).to(device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=config['LEARNING_RATE'])
-    criterion = create_loss_function(config['LOSS_FUNCTION']).to(device)  # Move criterion to device if applicable
 
     for epoch in tqdm(range(1, config['EPOCHS'] + 1)):
         print(f'Epoch {epoch}/{config["EPOCHS"]}')
         train_loss, train_iou = train(model, dataloaders['train'], criterion, optimizer, device)
-        test_loss, test_iou, inf_tile_ids = test(model, dataloaders['test'], criterion, device)
+        test_loss, test_iou = test(model, dataloaders['test'], criterion, device)
 
         wandb.log({
             'train/loss': train_loss,
             'train/iou': train_iou,
             'test/loss': test_loss,
-            'test/iou': test_iou
+            'test/iou': test_iou,
+            'learning_rate': optimizer.param_groups[0]['lr']
         })
 
         print(f'train_loss: {train_loss:.4f}, train_iou: {train_iou:.4f}, test_loss: {test_loss:.4f}, test_iou: {test_iou:.4f}')
 
+
         save_model(model, config['NEW_MODELS_DIR'], model_name, epoch)
+
+        # Plot validation images every 2 epochs
+        if epoch % 1 == 0:
+            plot_validation_images(model, dataloaders['test'], device, epoch)
 
     wandb.finish()
 

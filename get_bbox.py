@@ -1,9 +1,10 @@
 import geopandas as gpd
 from shapely.geometry import Polygon, mapping
 import json
+import matplotlib.pyplot as plt
 
 ### Define wetland/wetlandscape name
-STUDY_AREA = 'Helge'
+STUDY_AREA = 'Upper_lough_erne'
 
 ### Define shapefile path ###
 SHAPEFILE_PATH = f'study_areas/{STUDY_AREA}.shp'
@@ -40,8 +41,26 @@ def calculate_bounding_box(shapefile_path):
         STUDY_AREA: f"ee.Geometry.Polygon({json.dumps([coordinates])})"
     }
 
+
+    # Plot the bounding box using matplotlib
+    fig, ax = plt.subplots()
+    gdf.plot(ax=ax, color='blue', alpha=0.5)
+    x, y = bounding_box.exterior.xy
+    ax.plot(x, y, color='red')
+    plt.title(f'Bounding Box for {STUDY_AREA}')
+    plt.xlabel('Longitude')
+    plt.ylabel('Latitude')
+    plt.show()
+
+
     return formatted_bounding_box
 
 
 bounding_box = calculate_bounding_box(SHAPEFILE_PATH)
 print(bounding_box)
+
+
+
+
+
+

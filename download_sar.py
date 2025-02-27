@@ -4,14 +4,14 @@ from geetools import batch
 import ee
 
 ### Define parameters ###
-area_name = 'Persofjarden'
+area_name = 'Upper_lough_erne'
 ORBIT_PASS = 'DESCENDING'
-START_DATE = '2023-06-01'
-END_DATE = '2023-06-15'
+START_DATE = '2018-01-01'
+END_DATE = '2018-12-31'
 
 # For monthly composite export only
 START_YEAR = 2020
-END_YEAR = 2023
+END_YEAR = 2021
 
 # Define your bounding box for areas of interest
 def get_area_of_interest(area_name):
@@ -39,8 +39,24 @@ def get_area_of_interest(area_name):
               [13.96474439943455, 58.59721449015666], [13.873464893490109, 58.59721449015666], ]]),
         'Persofjarden': ee.Geometry.Polygon(
             [[[21.94304304010427, 65.71885538936476], [22.171295698637607, 65.71885538936476],
-              [22.171295698637607, 65.83352842819448], [21.94304304010427, 65.83352842819448], ]])
+              [22.171295698637607, 65.83352842819448], [21.94304304010427, 65.83352842819448], ]]),
+        'Takern': ee.Geometry.Polygon(
+            [[[14.707542295140854, 58.319238866980186], [14.921170146185375, 58.319238866980186],
+              [14.921170146185375, 58.387983447078454], [14.707542295140854, 58.387983447078454], ]]),
+        'Farnebofjarden': ee.Geometry.Polygon(
+            [[[16.64640602771607, 60.0337779207145], [17.018837808717933, 60.0337779207145],
+              [17.018837808717933, 60.33959057664384], [16.64640602771607, 60.33959057664384], ]]),
+        'Kulbacksliden': ee.Geometry.Polygon(
+            [[[19.509302456000057, 64.15199152000008], [19.593295690000048, 64.15199152000008],
+              [19.593295690000048, 64.19990718800005], [19.509302456000057, 64.19990718800005],
+              ]]),
+        'Upper_lough_erne': ee.Geometry.Polygon(
+            [[[-7.632520304999957, 54.12009783600007], [-7.269607505999943, 54.12009783600007],
+              [-7.269607505999943, 54.298014841000054], [-7.632520304999957, 54.298014841000054],
+              ]])
+
     }
+
 
     return areas_of_interest[area_name]
 
@@ -186,7 +202,7 @@ def main():
 
     # Choose which function to run
     bulk_export_sar(area_name, include_diff=True)
-    # bulk_export_monthly_sar(area_name)
+    #bulk_export_monthly_sar(area_name)
 
 if __name__ == "__main__":
     start = time.time()

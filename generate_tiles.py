@@ -7,7 +7,7 @@ import geopandas as gpd
 import pandas as pd
 from shapely.geometry import box
 import glob
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+import matplotlib.pyplot as plt
 
 ### Parameters
 
@@ -20,48 +20,6 @@ EPSG = 32633
 
 tile_id_counter = 0  # Global tile ID counter
 
-
-def resample_image(src_path, dst_path, match_path):
-    """Resample image to match the geotransform of another image."""
-    with rio.open(src_path) as src:
-        with rio.open(match_path) as match:
-            transform, width, height = calculate_default_transform(
-                src.crs, match.crs, match.width, match.height, *match.bounds)
-            kwargs = src.meta.copy()
-            kwargs.update({
-                'crs': match.crs,
-                'transform': transform,
-                'width': width,
-                'height': height
-            })
-
-            with rio.open(dst_path, 'w', **kwargs) as dst:
-                for i in range(1, src.count + 1):
-                    reproject(
-                        source=rio.band(src, i),
-                        destination=rio.band(dst, i),
-                        src_transform=src.transform,
-                        src_crs=src.crs,
-                        dst_transform=transform,
-                        dst_crs=match.crs,
-                        resampling=Resampling.nearest)
-
-
-def check_alignment(ndwi_file, sar_file):
-    """Check that NDWI and SAR images have the same alignment and resolution."""
-    with rio.open(ndwi_file) as ndwi_src, rio.open(sar_file) as sar_src:
-        if ndwi_src.transform != sar_src.transform:
-            print(f"Resampling SAR image to match NDWI image.")
-            resampled_sar_file = sar_file.replace('.tif', '_resampled.tif')
-            resample_image(sar_file, resampled_sar_file, ndwi_file)
-            return resampled_sar_file
-        if ndwi_src.crs != sar_src.crs:
-            raise ValueError("NDWI and SAR images do not have the same CRS.")
-        if ndwi_src.width != sar_src.width or ndwi_src.height != sar_src.height:
-            raise ValueError("NDWI and SAR images do not have the same dimensions.")
-    return sar_file
-
-
 def generate_tiles(image_file, size):
     """Generates size x size polygon tiles."""
     global tile_id_counter
@@ -71,6 +29,9 @@ def generate_tiles(image_file, size):
 
         for w in tqdm(range(0, width, size), total=width // size):
             for h in range(0, height, size):
+                if w + size > width or h + size > height:
+                    continue  # Skip tiles that would exceed image bounds
+
                 window = rio.windows.Window(w, h, size, size)
                 bbox = rio.windows.bounds(window, raster.transform)
                 geo_dict['id'].append(f'tile-{tile_id_counter}')
@@ -79,38 +40,58 @@ def generate_tiles(image_file, size):
 
         return gpd.GeoDataFrame(pd.DataFrame(geo_dict), crs=f"epsg:{EPSG}")
 
-
 def export_ndwi_mask_data(tiles, tif_file):
     if not os.path.exists(CROPPED_NDWI_MASK_DIR):
         os.makedirs(CROPPED_NDWI_MASK_DIR)
 
     with rio.open(tif_file) as src:
+        # Read and flip the SAR image
         dataset_array = src.read()
-        min_value = np.nanpercentile(dataset_array, 1)
-        max_value = np.nanpercentile(dataset_array, 99)
 
-        for _, tile in tqdm(tiles.iterrows(), total=tiles.shape[0]):
+        minValue = np.nanpercentile(dataset_array, 1)
+        maxValue = np.nanpercentile(dataset_array, 99)
+
+        # plot
+        plt.imshow(dataset_array[0], cmap='gray')
+        plt.show()
+
+    # Process each tile
+    for _, tile in tqdm(tiles.iterrows(), total=tiles.shape[0]):
+
+        with rio.open(tif_file) as src:
+
             shape = [tile['geometry']]
             name = tile['id']
-            print(f"Processing NDWI tile: {name}")
+            print(f"Processing SAR tile: {name}")
 
             try:
+                # Mask the flipped image for the current tile
                 out_image, out_transform = rio.mask.mask(src, shape, crop=True)
-                out_image = out_image.astype(np.float32)
+                # out_image = out_image.astype(np.float32)
 
                 if np.isnan(out_image).any():
-                    print(f"Skipping NDWI tile {name} due to NaN values.")
+                    print(f"Skipping ndwi tile {name} due to NaN values.")
                     continue
 
                 if out_image.shape[1] < PATCH_SIZE or out_image.shape[2] < PATCH_SIZE:
-                    print(f"Skipping NDWI tile {name} due to small size: {out_image.shape}")
+                    print(f"Skipping ndwi tile {name} due to small size: {out_image.shape}")
                     continue
 
-                out_image = out_image[:, :PATCH_SIZE, :PATCH_SIZE]
-                out_image = np.clip(out_image, min_value, max_value)
-                out_image = (out_image - min_value) / (max_value - min_value)
+                if out_image.shape[1] == PATCH_SIZE + 1:
+                    out_image = out_image[:, :-1, :]
+                if out_image.shape[2] == PATCH_SIZE + 1:
+                    out_image = out_image[:, :, 1:]
 
-                out_meta = src.meta.copy()
+                if out_image.shape[1] != PATCH_SIZE or out_image.shape[2] != PATCH_SIZE:
+                    continue
+
+                # Min-max scale the data to range [0, 1]
+                out_image[out_image > maxValue] = maxValue
+                out_image[out_image < minValue] = minValue
+                out_image = (out_image - minValue) / (maxValue - minValue)
+
+                out_meta = src.meta
+
                 out_meta.update({
                     "driver": "GTiff",
                     "height": out_image.shape[1],
@@ -132,18 +113,29 @@ def export_sar_data(tiles, tif_file):
         os.makedirs(CROPPED_SAR_DIR)
 
     with rio.open(tif_file) as src:
+        # Read and flip the SAR image
         dataset_array = src.read()
-        min_value = np.nanpercentile(dataset_array, 1)
-        max_value = np.nanpercentile(dataset_array, 99)
 
-        for _, tile in tqdm(tiles.iterrows(), total=tiles.shape[0]):
+        minValue = np.nanpercentile(dataset_array, 1)
+        maxValue = np.nanpercentile(dataset_array, 99)
+
+        # plot
+        plt.imshow(dataset_array[0], cmap='gray')
+        plt.show()
+
+    # Process each tile
+    for _, tile in tqdm(tiles.iterrows(), total=tiles.shape[0]):
+
+        with rio.open(tif_file) as src:
+
             shape = [tile['geometry']]
             name = tile['id']
             print(f"Processing SAR tile: {name}")
 
             try:
+                # Mask the flipped image for the current tile
                 out_image, out_transform = rio.mask.mask(src, shape, crop=True)
-                out_image = out_image.astype(np.float32)
+                #out_image = out_image.astype(np.float32)
 
                 if np.isnan(out_image).any():
                     print(f"Skipping SAR tile {name} due to NaN values.")
@@ -153,11 +145,21 @@ def export_sar_data(tiles, tif_file):
                     print(f"Skipping SAR tile {name} due to small size: {out_image.shape}")
                     continue
 
-                out_image = out_image[:, :PATCH_SIZE, :PATCH_SIZE]
-                out_image = np.clip(out_image, min_value, max_value)
-                out_image = (out_image - min_value) / (max_value - min_value)
+                if out_image.shape[1] == PATCH_SIZE + 1:
+                    out_image = out_image[:, :-1, :]
+                if out_image.shape[2] == PATCH_SIZE + 1:
+                    out_image = out_image[:, :, 1:]
 
-                out_meta = src.meta.copy()
+                if out_image.shape[1] != PATCH_SIZE or out_image.shape[2] != PATCH_SIZE:
+                    continue
+
+                # Min-max scale the data to range [0, 1]
+                out_image[out_image > maxValue] = maxValue
+                out_image[out_image < minValue] = minValue
+                out_image = (out_image - minValue) / (maxValue - minValue)
+
+                out_meta = src.meta
+
                 out_meta.update({
                     "driver": "GTiff",
                     "height": out_image.shape[1],
@@ -190,18 +192,31 @@ def process_sar_files(sar_files, ndwi_tiles):
         print(f"Processing SAR file: {sar_file}")
         export_sar_data(ndwi_tiles, sar_file)
 
+def plot_tiles(ndwi_tile_path, sar_tile_path):
+    with rio.open(ndwi_tile_path) as ndwi_src, rio.open(sar_tile_path) as sar_src:
+        ndwi_image = ndwi_src.read(1)
+        sar_image = sar_src.read(1)
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+        axes[0].imshow(ndwi_image, cmap='gray')
+        axes[0].set_title('NDWI Tile')
+        axes[1].imshow(sar_image, cmap='gray')
+        axes[1].set_title('SAR Tile')
+        plt.show()
+
 
 def main():
     ndwi_files = sorted(glob.glob(os.path.join(NDWI_MASK_DIR, '*.tif')))
     sar_files = sorted(glob.glob(os.path.join(SAR_DIR, '*.tif')))
 
-    resampled_sar_files = []
-    for ndwi_file, sar_file in zip(ndwi_files, sar_files):
-        resampled_sar_file = check_alignment(ndwi_file, sar_file)
-        resampled_sar_files.append(resampled_sar_file)
-
     ndwi_tiles = process_ndwi_files(ndwi_files)
-    process_sar_files(resampled_sar_files, ndwi_tiles)
+    process_sar_files(sar_files, ndwi_tiles)
+
+    # Plot the NDWI and SAR tile for tile 16288
+    plot_tiles(
+        os.path.join(CROPPED_NDWI_MASK_DIR, 'tile-16288-ndwi_mask.tif'),
+        os.path.join(CROPPED_SAR_DIR, 'tile-16288-sar_image.tif')
+    )
 
 
 if __name__ == "__main__":

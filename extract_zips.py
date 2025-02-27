@@ -2,7 +2,7 @@ import os
 import zipfile
 import shutil
 
-wetland_name = 'Tavvavuoma'
+wetland_name = 'Upper_lough_erne'
 
 # Directory containing your zip files
 zip_dir = 'gee_zipped'
